@@ -102,14 +102,13 @@ class BaseBackend:
     def generate(self, sigmaparser):
         """Method is called for each sigma rule and receives the parsed rule (SigmaParser)"""
         for parsed in sigmaparser.condparsed:
-            query = self.generateQuery(parsed)
             before = self.generateBefore(parsed)
-            after = self.generateAfter(parsed)
-
             if before is not None:
                 self.output.print(before, end="")
+            query =self.generateQuery(parsed)
             if query is not None:
                 self.output.print(query)
+            after = self.generateAfter(parsed)
             if after is not None:
                 self.output.print(after, end="")
 
@@ -392,34 +391,16 @@ class SingleTextQueryBackend(RulenameCommentMixin, BaseBackend, QuoteCharMixin):
     mapListValueExpression = None       # Syntax for field/value condititons where map value is a list
 
     def generateANDNode(self, node):
-        generated = [ self.generateNode(val) for val in node ]
-        filtered = [ g for g in generated if g is not None ]
-        if filtered:
-            return self.andToken.join(filtered)
-        else:
-            return None
+        return self.andToken.join([self.generateNode(val) for val in node])
 
     def generateORNode(self, node):
-        generated = [ self.generateNode(val) for val in node ]
-        filtered = [ g for g in generated if g is not None ]
-        if filtered:
-            return self.orToken.join(filtered)
-        else:
-            return None
+        return self.orToken.join([self.generateNode(val) for val in node])
 
     def generateNOTNode(self, node):
-        generated = self.generateNode(node.item)
-        if generated is not None:
-            return self.notToken + generated
-        else:
-            return None
+        return self.notToken + self.generateNode(node.item)
 
     def generateSubexpressionNode(self, node):
-        generated = self.generateNode(node.items)
-        if generated:
-            return self.subExpression % generated
-        else:
-            return None
+        return self.subExpression % self.generateNode(node.items)
 
     def generateListNode(self, node):
         if not set([type(value) for value in node]).issubset({str, int}):
@@ -885,187 +866,71 @@ class SplunkBackend(SingleTextQueryBackend):
         else:
             return " | stats %s(%s) as val by %s | search val %s %s" % (agg.aggfunc_notrans, agg.aggfield, agg.groupfield, agg.cond_op, agg.condition)
 
-class WindowsDefenderATPBackend(SingleTextQueryBackend):
-    """Converts Sigma rule into Windows Defender ATP Hunting Queries."""
-    identifier = "wdatp"
+class SplunkXMLBackend(SingleTextQueryBackend, MultiRuleOutputMixin):
+    """Converts Sigma rule into XML used for Splunk Dashboard Panels"""
+    identifier = "splunkxml"
     active = True
+    index_field = "index"
+
+
+    panel_pre = "<row><panel><title>"
+    panel_inf = "</title><table><search><query>"
+    panel_suf = "</query><earliest>$field1.earliest$</earliest><latest>$field1.latest$</latest><sampleRatio>1</sampleRatio>" \
+                "</search><option name=\"count\">20</option><option name=\"dataOverlayMode\">none</option><option name=\"" \
+                "drilldown\">row</option><option name=\"percentagesRow\">false</option><option name=\"refresh.display\">" \
+                "progressbar</option><option name=\"rowNumbers\">false</option><option name=\"totalsRow\">false</option>" \
+                "<option name=\"wrap\">true</option></table></panel></row>"
+    dash_pre = "<form><label>MyDashboard</label><fieldset submitButton=\"false\"><input type=\"time\" token=\"field1\">" \
+               "<label></label><default><earliest>-24h@h</earliest><latest>now</latest></default></input></fieldset>"
+    dash_suf = "</form>"
+    queries = dash_pre
+
 
     reEscape = re.compile('("|\\\\(?![*?]))')
-    reClear = None
-    andToken = " and "
-    orToken = " or "
-    notToken = "not "
-    subExpression = "(%s)"
-    listExpression = "(%s)"
-    listSeparator = ", "
-    valueExpression = "\"%s\""
-    nullExpression = "isnull(%s)"
-    notNullExpression = "isnotnull(%s)"
-    mapExpression = "%s == %s"
-    mapListsSpecialHandling = True
-    mapListValueExpression = "%s in %s"
+    reClear = SplunkBackend.reClear
+    andToken = SplunkBackend.andToken
+    orToken = SplunkBackend.orToken
+    notToken = SplunkBackend.notToken
+    subExpression = SplunkBackend.subExpression
+    listExpression = SplunkBackend.listExpression
+    listSeparator = SplunkBackend.listSeparator
+    valueExpression = SplunkBackend.valueExpression
+    nullExpression = SplunkBackend.nullExpression
+    notNullExpression = SplunkBackend.notNullExpression
+    mapExpression = SplunkBackend.mapExpression
+    mapListsSpecialHandling = SplunkBackend.mapListsSpecialHandling
+    mapListValueExpression = SplunkBackend.mapListValueExpression
 
-    def __init__(self, *args, **kwargs):
-        """Initialize field mappings"""
-        super().__init__(*args, **kwargs)
-        self.fieldMappings = {       # mapping between Sigma and ATP field names
-                # Supported values:
-                # (field name mapping, value mapping): distinct mappings for field name and value, may be a string (direct mapping) or function maps name/value to ATP target value
-                # (mapping function,): receives field name and value as parameter, return list of 2 element tuples (destination field name and value)
-                # (replacement, ): Replaces field occurrence with static string
-                "AccountName"               : (self.id_mapping, self.default_value_mapping),
-                "CommandLine"               : ("ProcessCommandLine", self.default_value_mapping),
-                "ComputerName"              : (self.id_mapping, self.default_value_mapping),
-                "DestinationHostname"       : ("RemoteUrl", self.default_value_mapping),
-                "DestinationIp"             : ("RemoteIP", self.default_value_mapping),
-                "DestinationIsIpv6"         : ("RemoteIP has \":\"", ),
-                "DestinationPort"           : ("RemotePort", self.default_value_mapping),
-                "Details"                   : ("RegistryValueData", self.default_value_mapping),
-                "EventType"                 : ("ActionType", self.default_value_mapping),
-                "Image"                     : ("FolderPath", self.default_value_mapping),
-                "ImageLoaded"               : ("FolderPath", self.default_value_mapping),
-                "LogonType"                 : (self.id_mapping, self.logontype_mapping),
-                "NewProcessName"            : ("FolderPath", self.default_value_mapping),
-                "ObjectValueName"           : ("RegistryValueName", self.default_value_mapping),
-                "ParentImage"               : ("InitiatingProcessFolderPath", self.default_value_mapping),
-                "SourceImage"               : ("InitiatingProcessFolderPath", self.default_value_mapping),
-                "TargetFilename"            : ("FolderPath", self.default_value_mapping),
-                "TargetImage"               : ("FolderPath", self.default_value_mapping),
-                "TargetObject"              : ("RegistryKey", self.default_value_mapping),
-                "User"                      : (self.decompose_user, ),
-                }
+    def generateMapItemListNode(self, key, value):
+        return "(" + (" OR ".join(['%s=%s' % (key, self.generateValueNode(item)) for item in value])) + ")"
 
-    def id_mapping(self, src):
-        """Identity mapping, source == target field name"""
-        return src
+    def generateAggregation(self, agg):
+        if agg == None:
+            return ""
+        if agg.aggfunc == sigma.parser.SigmaAggregationParser.AGGFUNC_NEAR:
+            return ""
+        if agg.groupfield == None:
+            return " | stats %s(%s) as val | search val %s %s" % (agg.aggfunc_notrans, agg.aggfield, agg.cond_op, agg.condition)
+        else:
+            return " | stats %s(%s) as val by %s | search val %s %s" % (agg.aggfunc_notrans, agg.aggfield, agg.groupfield, agg.cond_op, agg.condition)
 
-    def default_value_mapping(self, val):
-        op = "=="
-        if "*" in val[1:-1]:     # value contains * inside string - use regex match
-            op = "matches regex"
-            val = re.sub('([".^$]|\\\\(?![*?]))', '\\\\\g<1>', val)
-            val = re.sub('\\*', '.*', val)
-            val = re.sub('\\?', '.', val)
-        else:                           # value possibly only starts and/or ends with *, use prefix/postfix match
-            if val.endswith("*") and val.startswith("*"):
-                op = "contains"
-                val = self.cleanValue(val[1:-1])
-            elif val.endswith("*"):
-                op = "startswith"
-                val = self.cleanValue(val[:-1])
-            elif val.startswith("*"):
-                op = "endswith"
-                val = self.cleanValue(val[1:])
-
-        return "%s \"%s\"" % (op, val)
-
-    def logontype_mapping(self, src):
-        """Value mapping for logon events to reduced ATP LogonType set"""
-        logontype_mapping = {
-                2: "Interactive",
-                3: "Network",
-                4: "Batch",
-                5: "Service",
-                7: "Interactive",   # unsure
-                8: "Network",
-                9: "Interactive",   # unsure
-                10: "Remote interactive (RDP) logons",  # really the value?
-                11: "Interactive"
-                }
-        try:
-            return logontype_mapping[int(src)]
-        except KeyError:
-            raise NotSupportedError("Logon type %d unknown and can't be mapped" % src)
-
-    def decompose_user(self, src_field, src_value):
-        """Decompose domain\\user User field of Sysmon events into ATP InitiatingProcessAccountDomain and InititatingProcessAccountName."""
-        reUser = re.compile("^(.*?)\\\\(.*)$")
-        m = reUser.match(src_value)
-        if m:
-            domain, user = m.groups()
-            return (("InitiatingProcessAccountDomain", domain), ("InititatingProcessAccountName", user))
-        else:   # assume only user name is given if backslash is missing
-            return (("InititatingProcessAccountName", src_value),)
 
     def generate(self, sigmaparser):
-        self.table = None
-        try:
-            self.product = sigmaparser.parsedyaml['logsource']['product']
-            self.service = sigmaparser.parsedyaml['logsource']['service']
-        except KeyError:
-            self.product = None
-            self.service = None
+        """Method is called for each sigma rule and receives the parsed rule (SigmaParser)"""
+        for parsed in sigmaparser.condparsed:
+            query = self.generateQuery(parsed)
+            if query is not None:
+                self.queries += self.panel_pre
+                self.queries += self.getRuleName(sigmaparser)
+                self.queries += self.panel_inf
+                query = query.replace("<", "&lt;")
+                query = query.replace(">", "&gt;")
+                self.queries += query
+                self.queries += self.panel_suf
 
-        super().generate(sigmaparser)
-
-    def generateBefore(self, parsed):
-        if self.table is None:
-            raise NotSupportedError("No WDATP table could be determined from Sigma rule")
-        return "%s | where " % self.table
-
-    def generateMapItemNode(self, node):
-        """
-        ATP queries refer to event tables instead of Windows logging event identifiers. This method catches conditions that refer to this field
-        and creates an appropriate table reference.
-        """
-        key, value = node
-        if type(value) == list:         # handle map items with values list like multiple OR-chained conditions
-            return self.generateORNode(
-                    [(key, v) for v in value]
-                    )
-        elif key == "EventID":            # EventIDs are not reflected in condition but in table selection
-            if self.product == "windows":
-                if self.service == "sysmon" and value == 1 \
-                    or self.service == "security" and value == 4688:    # Process Execution
-                    self.table = "ProcessCreationEvents"
-                    return None
-                elif self.service == "sysmon" and value == 3:      # Network Connection
-                    self.table = "NetworkCommunicationEvents"
-                    return None
-                elif self.service == "sysmon" and value == 7:      # Image Load
-                    self.table = "ImageLoadEvents"
-                    return None
-                elif self.service == "sysmon" and value == 8:      # Create Remote Thread
-                    self.table = "MiscEvents"
-                    return "ActionType == \"CreateRemoteThread\""
-                elif self.service == "sysmon" and value == 11:     # File Creation
-                    self.table = "FileCreationEvents"
-                    return None
-                elif self.service == "sysmon" and value == 13 \
-                    or self.service == "security" and value == 4657:    # Set Registry Value
-                    self.table = "RegistryEvents"
-                    return "ActionType == \"SetValue\""
-                elif self.service == "security" and value == 4624:
-                    self.table = "LogonEvents"
-                    return None
-        elif type(value) in (str, int):     # default value processing
-            try:
-                mapping = self.fieldMappings[key]
-            except KeyError:
-                raise NotSupportedError("No mapping defined for field '%s'" % key)
-            if len(mapping) == 1:
-                mapping = mapping[0]
-                if type(mapping) == str:
-                    return mapping
-                elif callable(mapping):
-                    conds = mapping(key, value)
-                    return self.generateSubexpressionNode(
-                            self.generateANDNode(
-                                [cond for cond in mapping(key, value)]
-                                )
-                            )
-            elif len(mapping) == 2:
-                result = list()
-                for mapitem, val in zip(mapping, node):     # iterate mapping and mapping source value synchronously over key and value
-                    if type(mapitem) == str:
-                        result.append(mapitem)
-                    elif callable(mapitem):
-                        result.append(mapitem(val))
-                return "{} {}".format(*result)
-            else:
-                raise TypeError("Backend does not support map values of type " + str(type(value)))
-
-        return super().generateMapItemNode(node)
+    def finalize(self):
+        self.queries += self.dash_suf
+        self.output.print(self.queries)
 
 class GrepBackend(BaseBackend, QuoteCharMixin):
     """Generates Perl compatible regular expressions and puts 'grep -P' around it"""
@@ -1183,228 +1048,3 @@ class BackendError(Exception):
 class NotSupportedError(BackendError):
     """Exception is raised if some output is required that is not supported by the target language."""
     pass
-
-class PartialMatchError(Exception):
-    pass
-
-class FullMatchError(Exception):
-    pass    
-
-class ArcSightBackend(SingleTextQueryBackend):
-    """Converts Sigma rule into ArcSight saved search. Contributed by SOC Prime. https://socprime.com"""
-    identifier = "arcsight"
-    active = True
-    andToken = " AND "
-    orToken = " OR "
-    notToken = " NOT "
-    subExpression = "(%s)"
-    listExpression = "(%s)"
-    listSeparator = " OR "
-    valueExpression = "\"%s\""
-    containsExpression = "%s CONTAINS %s"
-    nullExpression = "NOT _exists_:%s"
-    notNullExpression = "_exists_:%s"
-    mapExpression = "%s = %s"
-    mapListsSpecialHandling = True
-    mapListValueExpression = "%s = %s"
-
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        aFL = ["deviceVendor", "categoryDeviceGroup", "deviceProduct"]
-        for item in self.sigmaconfig.fieldmappings.values():
-            if item.target_type is list:
-                aFL.extend(item.target)
-            else:
-                aFL.append(item.target)
-        self.allowedFieldsList = list(set(aFL))
-
-    # Skip logsource value from sigma document for separate path.
-    def generateCleanValueNodeLogsource(self, value):
-        return self.valueExpression % (self.cleanValue(str(value)))
-
-    # Clearing values from special characters.
-    def CleanNode(self, node):
-        search_ptrn = re.compile(r"[\/\\@?#&_%*',\(\)\" ]")
-        replace_ptrn = re.compile(r"[ \/\\@?#&_%*',\(\)\" ]")
-        match = search_ptrn.search(str(node))
-        new_node = list()
-        if match:
-            replaced_str = replace_ptrn.sub('*', node)
-            node = [x for x in replaced_str.split('*') if x]
-            new_node.extend(node)
-        else:
-            new_node.append(node)
-        node = new_node
-        return node
-
-    # Clearing values from special characters.
-    def generateMapItemNode(self, node):
-        key, value = node
-        if key in self.allowedFieldsList:
-            if self.mapListsSpecialHandling == False and type(value) in (
-                    str, int, list) or self.mapListsSpecialHandling == True and type(value) in (str, int):
-                return self.mapExpression % (key, self.generateCleanValueNodeLogsource(value))
-            elif type(value) is list:
-                return self.generateMapItemListNode(key, value)
-            else:
-                raise TypeError("Backend does not support map values of type " + str(type(value)))
-        else:
-            if self.mapListsSpecialHandling == False and type(value) in (
-                    str, int, list) or self.mapListsSpecialHandling == True and type(value) in (str, int):
-                if type(value) is str:
-                    new_value = list()
-                    value = self.CleanNode(value)
-                    if type(value) == list:
-                        new_value.append(self.andToken.join([self.valueExpression % val for val in value]))
-                    else:
-                        new_value.append(value)
-                    if len(new_value)==1:
-                        return "(" + self.generateANDNode(new_value) + ")"
-                    else:
-                        return "(" + self.generateORNode(new_value) + ")"
-                else:
-                    return self.generateValueNode(value)
-            elif type(value) is list:
-                new_value = list()
-                for item in value:
-                    item = self.CleanNode(item)
-                    if type(item) is list and len(item) == 1:
-                        new_value.append(self.valueExpression % item[0])
-                    elif type(item) is list:
-                        new_value.append(self.andToken.join([self.valueExpression % val for val in item]))
-                    else:
-                        new_value.append(item)
-                return self.generateORNode(new_value)
-            else:
-                raise TypeError("Backend does not support map values of type " + str(type(value)))
-
-    # for keywords values with space
-    def generateValueNode(self, node):
-        if type(node) is int:
-            return self.cleanValue(str(node))
-        if 'AND' in node:
-            return "(" + self.cleanValue(str(node)) + ")"
-        else:
-            return self.cleanValue(str(node))
-
-    # collect elements of Arcsight search using OR
-    def generateMapItemListNode(self, key, value):
-        itemslist = list()
-        for item in value:
-            if key in self.allowedFieldsList:
-                itemslist.append('%s = %s' % (key, self.generateValueNode(item)))
-            else:
-                itemslist.append('%s' % (self.generateValueNode(item)))
-        return " OR ".join(itemslist)
-
-    # prepare of tail for every translate
-    def generate(self, sigmaparser):
-        """Method is called for each sigma rule and receives the parsed rule (SigmaParser)"""
-        const_title = ' AND type != 2 | rex field = flexString1 mode=sed "s//Sigma: {}/g"'
-        for parsed in sigmaparser.condparsed:
-            self.output.print(self.generateQuery(parsed) + const_title.format(sigmaparser.parsedyaml["title"]))
-
-    # Add "( )" for values
-    def generateSubexpressionNode(self, node):
-        return self.subExpression % self.generateNode(node.items)
-
-    # generateORNode algorithm for ArcSightBackend class.
-    def generateORNode(self, node):
-        if type(node) == sigma.parser.ConditionOR and all(isinstance(item, str) for item in node):
-            new_value = list()
-            for value in node:
-                value = self.CleanNode(value)
-                if type(value) is list:
-                    new_value.append(self.andToken.join([self.valueExpression % val for val in value]))
-                else:
-                    new_value.append(value)
-            return "(" + self.orToken.join([self.generateNode(val) for val in new_value]) + ")"
-        return "(" + self.orToken.join([self.generateNode(val) for val in node]) + ")"
-        
-class QualysBackend(SingleTextQueryBackend):
-    """Converts Sigma rule into Qualys saved search. Contributed by SOC Prime. https://socprime.com"""
-    identifier = "qualys"
-    active = True
-    andToken = " and "
-    orToken = " or "
-    notToken = "not "
-    subExpression = "(%s)"
-    listExpression = "%s"
-    listSeparator = " "
-    valueExpression = "%s"
-    nullExpression = "%s is null"
-    notNullExpression = "not (%s is null)"
-    mapExpression = "%s:`%s`"
-    mapListsSpecialHandling = True
-    PartialMatchFlag = False
-
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        fl = []
-        for item in self.sigmaconfig.fieldmappings.values():
-            if item.target_type == list:
-                fl.extend(item.target)
-            else:
-                fl.append(item.target)
-        self.allowedFieldsList = list(set(fl))
-
-    def generateORNode(self, node):
-        new_list = []
-        for val in node:
-            if type(val) == tuple and not(val[0] in self.allowedFieldsList):
-                pass
-                # self.PartialMatchFlag = True
-            else:
-                new_list.append(val)
-
-        generated = [self.generateNode(val) for val in new_list]
-        filtered = [g for g in generated if g is not None]
-        return self.orToken.join(filtered)
-
-    def generateANDNode(self, node):
-        new_list = []
-        for val in node:
-            if type(val) == tuple and not(val[0] in self.allowedFieldsList):
-                self.PartialMatchFlag = True
-            else:
-                new_list.append(val)
-        generated = [self.generateNode(val) for val in new_list]
-        filtered = [g for g in generated if g is not None]
-        return self.andToken.join(filtered)
-
-    def generateMapItemNode(self, node):
-        key, value = node
-        if self.mapListsSpecialHandling == False and type(value) in (str, int, list) or self.mapListsSpecialHandling == True and type(value) in (str, int):
-            if key in self.allowedFieldsList:
-                return self.mapExpression % (key, self.generateNode(value))
-            else:
-                return self.generateNode(value)
-        elif type(value) == list:
-            return self.generateMapItemListNode(key, value)
-        else:
-            raise TypeError("Backend does not support map values of type " + str(type(value)))
-
-    def generateMapItemListNode(self, key, value):
-        itemslist = []
-        for item in value:
-            if key in self.allowedFieldsList:
-                itemslist.append('%s:`%s`' % (key, self.generateValueNode(item)))
-            else:
-                itemslist.append('%s' % (self.generateValueNode(item)))
-        return "(" + (" or ".join(itemslist)) + ")"
-
-    def generate(self, sigmaparser):
-        """Method is called for each sigma rule and receives the parsed rule (SigmaParser)"""
-        all_keys = set()
-
-        for parsed in sigmaparser.condparsed:
-            query = self.generateQuery(parsed)
-            if query == "()":
-                self.PartialMatchFlag = None
-
-            if self.PartialMatchFlag == True:
-                raise PartialMatchError(query)
-            elif self.PartialMatchFlag == None:
-                raise FullMatchError(query)
-            else:
-                self.output.print(query)
